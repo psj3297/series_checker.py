@@ -4,7 +4,9 @@ import re
 import time
 from urllib.parse import quote
 from selenium import webdriver
-from selenium.webdriver.chrome.service import Service
+# 🚨 Service와 ChromeDriverManager 추가
+from selenium.webdriver.chrome.service import Service as ChromeService
+from webdriver_manager.chrome import ChromeDriverManager
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
@@ -13,7 +15,6 @@ from difflib import SequenceMatcher
 from selenium.common.exceptions import WebDriverException, TimeoutException
 from selenium_stealth import stealth
 from bs4 import BeautifulSoup
-
 # 🚨 ChromeDriver Path Setting
 CHROMEDRIVER_PATH = "C:/Program Files/chromedriver/chromedriver.exe"
 # 🚨 Debug mode is off for minimal output
@@ -102,26 +103,30 @@ def parse_detail_box_html(html: str) -> dict:
 # ======================================================================
 
 def init_driver():
-    """Initializes Chrome Driver with Headless and Stealth settings."""
+    """Chrome Driver 자동 관리 및 Stealth 설정 적용"""
     options = Options()
 
-    # Speed and Stability Options
+    # 속도 및 안정성 옵션
     options.add_argument("--headless")
     options.add_argument("--disable-gpu")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--start-maximized")
-    options.add_argument("--log-level=3")  # Suppress log messages
+    options.add_argument("--window-size=1920,1080")
+    options.add_argument("--log-level=3")
+
+    # 봇 감지 회피를 위한 User-Agent 설정
     options.add_argument(
-        "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36"
-    )
+        "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36")
     options.add_argument("--disable-blink-features=AutomationControlled")
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
     options.add_experimental_option("useAutomationExtension", False)
 
     try:
-        driver = webdriver.Chrome(service=Service(CHROMEDRIVER_PATH), options=options)
-        # Apply Stealth: Anti-Bot Evasion
+        # 🚨 핵심: ChromeDriverManager를 사용하여 드라이버 자동 설치 및 경로 지정
+        service = ChromeService(ChromeDriverManager().install())
+        driver = webdriver.Chrome(service=service, options=options)
+
+        # Stealth 설정: 문피아 봇 차단 우회용
         stealth(
             driver,
             languages=["en-US", "en"],
@@ -132,48 +137,55 @@ def init_driver():
             fix_hairline=True,
         )
         return driver
-    except WebDriverException as e:
-        raise WebDriverException(f"Driver initialization failed: {e}")
+    except Exception as e:
+        raise Exception(f"드라이버 초기화 중 오류 발생: {e}")
 
 
 def search_munpia_novel(driver, title: str) -> dict:
-    """Searches Munpia and extracts details using the reused driver."""
+    """문피아 검색 결과 목록에서 가장 유사한 소설을 찾아 상세 정보를 추출합니다."""
     try:
-        # 1. Access Search Page
+        # 1. 검색 페이지 접속
         search_url = f"https://novel.munpia.com/page/hd.platinum/view/search/keyword/{quote(title)}/order/search_result"
         driver.get(search_url)
-        # 🚨 Wait time reduced from 10s to 7s
         wait = WebDriverWait(driver, 7)
 
-        # 2. Find the first link
+        # 2. 검색 결과 리스트의 제목 요소들 모두 가져오기
         wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "a.title")))
-        first_link = driver.find_element(By.CSS_SELECTOR, "a.title")
-        page_title = first_link.text.strip()
+        # 🚨 중요: 하나만 찾는 게 아니라 '모두(elements)' 찾습니다.
+        title_elements = driver.find_elements(By.CSS_SELECTOR, "a.title")
 
-        # 3. Check title similarity
-        if title_similarity(title, page_title) > 0.6:
-            # 4. Navigate to detail page
-            first_link.click()
+        target_element = None
 
-            # 5. Wait for detail box to load
+        # 3. 검색 결과 상위 5개를 돌며 유사도 체크
+        for el in title_elements[:5]:
+            found_title = el.text.strip()
+            if title_similarity(title, found_title) > 0.6:
+                target_element = el
+                break  # 일치하는 걸 찾으면 루프 종료
+
+        if target_element:
+            # 4. 일치하는 소설 클릭하여 상세 페이지 이동
+            target_element.click()
+
+            # 5. 상세 정보 박스 로딩 대기
             wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "div.dd.detail-box")))
-            # 🚨 Blind wait reduced from 1.5s to 1.0s for speed
             time.sleep(1.0)
 
-            # 6. Extract and parse detail box HTML
+            # 6. HTML 추출 및 파싱
             detail_box = driver.find_element(By.CSS_SELECTOR, "div.dd.detail-box")
             html = detail_box.get_attribute("outerHTML")
             info = parse_detail_box_html(html)
 
             return info
         else:
-            return {"error": f"제목 '{title}'와 검색 결과 '{page_title}'가 일치하지 않음"}
+            # 상위 결과 중 일치하는 게 없을 때
+            actual_first = title_elements[0].text.strip() if title_elements else "결과 없음"
+            return {"error": f"제목 '{title}'와 일치하는 결과를 찾지 못함 (가장 가까운 결과: '{actual_first}')"}
 
     except TimeoutException:
         return {"error": f"'{title}' 검색 결과 로딩 시간 초과"}
     except Exception as e:
-        # Note: We rely on the outer try/except/finally for driver cleanup
-        return {"error": f"'{title}' 처리 중 오류 발생 (내부 오류: {str(e)[:50]}...)"}
+        return {"error": f"'{title}' 처리 중 오류 발생: {str(e)[:50]}"}
 
 
 # ======================================================================
